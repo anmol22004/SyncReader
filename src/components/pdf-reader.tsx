@@ -10,6 +10,7 @@ const PdfReader = forwardRef<ReaderHandle, Props>(function PdfReader(props, ref)
   const latest = useRef(props); latest.current = props; const armed = useRef(false); const initialized = useRef(false); const rendering = useRef(false);
   const pending = useRef<Location | null>(props.initial); const current = useRef<Location | null>(props.initial); const pageRef = useRef(page); pageRef.current = page;
   const scrollIntent = useRef(false); const navigationPending = useRef(false);
+  const selectionAction = useRef(false); const checkSelection = useRef<() => void>(() => {});
   const viewport = useRef<ReturnType<Awaited<ReturnType<PDFDocumentProxy['getPage']>>['getViewport']> | null>(null);
   const [width, setWidth] = useState(700);
   function getLocation(): Location {
@@ -97,16 +98,57 @@ const PdfReader = forwardRef<ReaderHandle, Props>(function PdfReader(props, ref)
     }
   }));
   function selected() {
-    const selection = window.getSelection(); if (!selection || selection.isCollapsed || !pageHost.current || !viewport.current || !selection.rangeCount) return;
-    const range = selection.getRangeAt(0); if (!pageHost.current.contains(range.commonAncestorContainer)) return;
-    const quote = selection.toString().trim(); if (!quote) return;
+    // Moving focus into the annotation controls can collapse the native range.
+    // Keep the captured passage available until that action has completed.
+    if (selectionAction.current || document.querySelector('.modal .selected-quote')) return;
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !pageHost.current || !viewport.current || !selection.rangeCount) { latest.current.onSelection(null); return; }
+    const range = selection.getRangeAt(0);
+    if (!pageHost.current.contains(range.commonAncestorContainer)) { latest.current.onSelection(null); return; }
+    const quote = selection.toString().trim();
+    if (!quote) { latest.current.onSelection(null); return; }
     const hostRect = pageHost.current.getBoundingClientRect(); const v = viewport.current, [x0,y0,x1,y1] = v.viewBox;
     const rects = Array.from(range.getClientRects()).filter(r => r.width > 0 && r.height > 0).map(r => {
       const a = v.convertToPdfPoint(r.left - hostRect.left, r.top - hostRect.top), b = v.convertToPdfPoint(r.right - hostRect.left, r.bottom - hostRect.top);
       return [(Math.min(a[0],b[0])-x0)/(x1-x0),(Math.min(a[1],b[1])-y0)/(y1-y0),(Math.max(a[0],b[0])-x0)/(x1-x0),(Math.max(a[1],b[1])-y0)/(y1-y0)].map(n => Math.max(0,Math.min(1,n)));
     });
-    latest.current.onSelection({ quote: quote.slice(0,20000), anchor: { type: 'pdf', page, rects } });
+    latest.current.onSelection(rects.length ? { quote: quote.slice(0,20000), anchor: { type: 'pdf', page: pageRef.current, rects } } : null);
   }
+  checkSelection.current = selected;
+  useEffect(() => {
+    const inputAbort = new AbortController();
+    let frame: number | undefined; let release: ReturnType<typeof setTimeout> | undefined;
+    const queueCheck = () => { if (frame !== undefined) cancelAnimationFrame(frame); frame = requestAnimationFrame(() => { frame = undefined; checkSelection.current(); }); };
+    const protectedTarget = (target: EventTarget | null) => target instanceof Element && Boolean(target.closest('.selection-actions,.modal'));
+    const start = (event: Event) => {
+      clearTimeout(release);
+      selectionAction.current = protectedTarget(event.target);
+      if (selectionAction.current) return;
+      // A tap on reader chrome/empty space should dismiss the old passage even
+      // when the browser retains its previous text selection after the tap.
+      if (!(event.target instanceof Node) || !pageHost.current?.contains(event.target)) {
+        const native = window.getSelection();
+        if (native?.rangeCount && pageHost.current?.contains(native.getRangeAt(0).commonAncestorContainer)) native.removeAllRanges();
+        latest.current.onSelection(null);
+      }
+    };
+    const end = () => {
+      if (selectionAction.current) {
+        // Let click handlers open/save the highlight dialog before checking.
+        clearTimeout(release); release = setTimeout(() => { selectionAction.current = false; queueCheck(); }, 0);
+      } else queueCheck();
+    };
+    const changed = () => { if (!selectionAction.current) queueCheck(); };
+    const options = { capture: true, signal: inputAbort.signal };
+    document.addEventListener('pointerdown', start, options);
+    document.addEventListener('pointerup', end, options);
+    document.addEventListener('pointercancel', end, options);
+    document.addEventListener('touchstart', start, { ...options, passive: true });
+    document.addEventListener('touchend', end, { ...options, passive: true });
+    document.addEventListener('touchcancel', end, { ...options, passive: true });
+    document.addEventListener('selectionchange', changed, { signal: inputAbort.signal });
+    return () => { inputAbort.abort(); clearTimeout(release); if (frame !== undefined) cancelAnimationFrame(frame); selectionAction.current = false; };
+  }, []);
   return <div className="pdf-scroll" ref={scroll} onWheel={() => { scrollIntent.current = true; }} onTouchMove={() => { scrollIntent.current = true; }} onPointerDown={e => { if (e.target === scroll.current) scrollIntent.current = true; }} onMouseUp={selected} onTouchEnd={selected} onScroll={() => { if (!initialized.current || rendering.current || !scrollIntent.current) return; armed.current = true; const l = getLocation(); current.current = l; latest.current.onLocation(l); }}><div className="pdf-page" ref={pageHost} style={{ width: dimensions.width, height: dimensions.height }}><canvas ref={canvas} /><div className="textLayer" ref={textHost} /><div className="pdf-highlights">{props.annotations.filter(a => a.kind === 'highlight' && a.anchor.type === 'pdf' && a.anchor.page === page).flatMap(a => a.anchor.type === 'pdf' ? a.anchor.rects.map((rect,i) => { const v = viewport.current; if (!v) return null; const [x0,y0,x1,y1] = v.viewBox; const r = v.convertToViewportRectangle([x0+rect[0]*(x1-x0),y0+rect[1]*(y1-y0),x0+rect[2]*(x1-x0),y0+rect[3]*(y1-y0)]); return <span key={`${a.id}-${i}`} style={{ left: Math.min(r[0],r[2]), top: Math.min(r[1],r[3]), width: Math.abs(r[2]-r[0]), height: Math.abs(r[3]-r[1]) }} />; }) : [])}</div></div></div>;
 });
 export default PdfReader;

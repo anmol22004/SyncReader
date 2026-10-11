@@ -2,19 +2,23 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import type { Book as EpubBook, Rendition } from 'epubjs';
 import type { Anchor, Annotation, Location, Preferences, SearchResult } from '@/lib/types';
-import { fontFor, presetFor, typographyKey } from '@/lib/reading-preferences';
+import { typographyKey } from '@/lib/reading-preferences';
+import { applyEpubAppearance } from '@/lib/epub-appearance';
+import { stabilizeDocumentScroll, type DocumentScrollManager } from '@/lib/epub-scroll';
 import { bookPagePosition, type BookPages } from '@/lib/epub-pages';
 import { epubProgress } from '@/lib/locations';
 import type { ReaderHandle, Selection, TocItem } from './reader-engine';
 type EpubLocation = { start: { cfi: string; href: string; index: number; percentage?: number; displayed?: { page: number; total: number } } };
 // EPUB.js supports a resize anchor at runtime, but omits it from its declarations.
 type AnchoredRendition = Rendition & { resize(width: number, height: number, cfi?: string): void };
+type ManagedRendition = Rendition & { manager: DocumentScrollManager };
 type RuntimeSection = { load: (loader: EpubBook['load']) => Promise<unknown> | Document; find: (q: string) => { cfi: string; excerpt: string }[]; href: string; index: number };
 type Props = { documentScroll: boolean; onReadingGesture: (delta: number) => void; onToggleControls: () => void; bytes: ArrayBuffer; initial: Location | null; preferences: Preferences; annotations: Annotation[]; onLocation: (l: Location) => void; onProgress: (l: Location) => void; onChapterRemaining: (screens: number | null) => void; onPages: (pages: BookPages | null) => void; onReady: (l: Location, toc: TocItem[]) => void; onSelection: (s: Selection | null) => void; onError: (e: string) => void };
 const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, ref) {
   const host = useRef<HTMLDivElement>(null); const book = useRef<EpubBook | null>(null); const rendition = useRef<Rendition | null>(null);
   const latest = useRef(props); latest.current = props;
   const armed = useRef(false); const current = useRef<Location | null>(null); const suppressed = useRef(false);
+  const lastScroll = useRef(0);
   const [loaded, setLoaded] = useState(false);
   const viewportHost = useRef<HTMLDivElement>(null);
   const pageCounts = useRef<Record<number, number>>({}); const lastRaw = useRef<EpubLocation | null>(null);
@@ -33,11 +37,16 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
     const length = (book.current?.spine as unknown as { length: number })?.length || 1;
     return { version: 1, type: 'epub', cfi: raw.start.cfi, href: raw.start.href, spineIndex: raw.start.index, progression: epubProgress(raw.start, length, (book.current?.locations.length() || 0) > 1) };
   }
+  const rendererPreferences = useRef(new WeakMap<Rendition, Preferences>());
   function applyPreferences(r = rendition.current, p = latest.current.preferences) {
     if (!r) return;
-    const palette = presetFor(p); const colors = { color: palette.color, background: palette.background };
-    r.themes.default({ body: { ...colors, 'font-family': `${fontFor(p)} !important`, 'line-height': `${p.lineHeight} !important`, padding: `${latest.current.documentScroll ? '88px' : '16px'} min(${p.margins}px, 12vw) ${latest.current.documentScroll ? '80px' : '16px'} !important`, margin: '0 auto !important', 'max-width': '860px !important', 'box-sizing': 'border-box !important', 'overflow-wrap': 'anywhere', 'overflow-anchor': 'none', 'font-weight': `${p.bold ? 700 : 400} !important`, 'letter-spacing': `${p.letterSpacing}em !important`, 'word-spacing': `${p.wordSpacing}em !important`, 'text-align': `${p.justify ? 'justify' : 'start'} !important` }, 'p,li,blockquote': { 'font-family': `${fontFor(p)} !important`, 'font-weight': `${p.bold ? 700 : 400} !important`, 'line-height': `${p.lineHeight} !important`, 'letter-spacing': `${p.letterSpacing}em !important`, 'word-spacing': `${p.wordSpacing}em !important`, 'text-align': `${p.justify ? 'justify' : 'start'} !important` }, 'a': { color: '#65876c' }, 'img,svg,video': { 'max-width': '100% !important', height: 'auto !important' }, 'pre': { 'white-space': 'pre-wrap !important' }, 'table': { 'max-width': '100% !important' }, 'h1,h2,h3': { 'line-height': '1.3 !important' } });
-    r.themes.fontSize(`${p.fontSize}px`);
+    const settings = rendererPreferences.current;
+    if (!settings.has(r)) r.hooks.content.register((contents: { document: Document }) => {
+      applyEpubAppearance(contents.document, settings.get(r)!, latest.current.documentScroll);
+    });
+    settings.set(r, p);
+    const contents = r.getContents() as unknown as { document: Document }[];
+    for (const content of contents) applyEpubAppearance(content.document, p, latest.current.documentScroll);
   }
   useEffect(() => {
     const resume = current.current || props.initial;
@@ -56,10 +65,19 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
         // fullsize is supported by EPUB.js managers but absent from its public types.
         const options = { width, height, fullsize: props.documentScroll, manager: 'continuous', flow: 'scrolled-continuous', spread: 'none', snap: false, resizeOnOrientationChange: false, allowScriptedContent: false };
         const r = b.renderTo(host.current, options); rendition.current = r;
+        await r.started; if (disposed) return;
+        if (props.documentScroll) stabilizeDocumentScroll((r as ManagedRendition).manager, height);
+        const markScroll = () => { lastScroll.current = Date.now(); };
+        window.addEventListener('scroll', markScroll, { passive: true, capture: true, signal: inputAbort.signal });
         r.hooks.content.register((contents: { document: Document }) => {
           let touchY: number | null = null;
-          const arm = () => { if (!suppressed.current) armed.current = true; };
-          contents.document.addEventListener('wheel', event => latest.current.onReadingGesture(event.deltaY), { passive: true });
+          const arm = () => { lastScroll.current = Date.now(); if (!suppressed.current) armed.current = true; };
+          contents.document.addEventListener('selectionchange', () => {
+            if (document.querySelector('.selected-quote')) return;
+            const selected = contents.document.getSelection();
+            if (!selected || selected.isCollapsed || !selected.toString().trim()) latest.current.onSelection(null);
+          });
+          contents.document.addEventListener('wheel', event => { if (!event.ctrlKey && !event.metaKey) latest.current.onReadingGesture(event.deltaY); }, { passive: true });
           contents.document.addEventListener('touchstart', event => { touchY = event.touches.length === 1 ? event.touches[0].clientY : null; }, { passive: true });
           contents.document.addEventListener('touchmove', event => {
             if (event.touches.length !== 1 || touchY === null) { touchY = null; return; }
@@ -69,7 +87,12 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
           contents.document.addEventListener('touchcancel', () => { touchY = null; }, { passive: true });
           contents.document.addEventListener('wheel', arm, { passive: true });
           contents.document.addEventListener('touchmove', arm, { passive: true });
-          contents.document.addEventListener('keydown', event => { if (['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', ' '].includes(event.key)) arm(); });
+          contents.document.addEventListener('keydown', event => {
+            const target = event.target as Element | null;
+            if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || target?.closest('input,textarea,select,button,a,[contenteditable]')) return;
+            if (['ArrowDown', 'PageDown', 'End'].includes(event.key) || event.key === ' ' && !event.shiftKey) { arm(); latest.current.onReadingGesture(48); }
+            if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || event.key === ' ' && event.shiftKey) { arm(); latest.current.onReadingGesture(-24); }
+          });
           contents.document.addEventListener('click', event => {
             const element = event.target as Element | null; const link = element?.closest('a'); const href = link?.getAttribute('href');
             if (!link && !contents.document.getSelection()?.toString() && !element?.closest('button,input,textarea,select')) latest.current.onToggleControls();
@@ -106,7 +129,7 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
         if (!toc.length) b.spine.each((section: RuntimeSection) => { toc.push({ label: `Chapter ${section.index + 1}`, href: section.href, depth: 0 }); });
         latest.current.onReady(current.current, toc);
         setLoaded(true);
-        const armScroll = () => { if (!suppressed.current) armed.current = true; };
+        const armScroll = () => { lastScroll.current = Date.now(); if (!suppressed.current) armed.current = true; };
         host.current?.addEventListener('wheel', armScroll, { passive: true, signal: inputAbort.signal });
         host.current?.addEventListener('touchmove', armScroll, { passive: true, signal: inputAbort.signal });
         host.current?.addEventListener('pointerdown', event => { if (event.target === host.current?.querySelector('.epub-container')) armScroll(); }, { signal: inputAbort.signal });
@@ -141,6 +164,7 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
             width = nextWidth; height = nextHeight; viewportSize.current = { width, height }; setPageViewport({ width, height });
             const cfi = current.current?.type === 'epub' ? current.current.cfi : undefined;
             armed.current = false; suppressed.current = true;
+            if (props.documentScroll) stabilizeDocumentScroll((r as ManagedRendition).manager, height);
             (r as AnchoredRendition).resize(width, height, cfi);
             clearTimeout(settleTimer);
             settleTimer = setTimeout(() => { if (!disposed) suppressed.current = false; }, 600);
@@ -189,11 +213,14 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
         const { default: ePub } = await import('epubjs'); if (disposed) return;
         const b = ePub(props.bytes.slice(0)); counter = b; await b.ready; if (disposed) return;
         const r = b.renderTo(surface, { width: pageViewport.width, height: pageViewport.height, manager: 'default', flow: 'scrolled-continuous', spread: 'none', allowScriptedContent: false, resizeOnOrientationChange: false });
+        await r.started; if (disposed) return;
         applyPreferences(r, props.preferences);
         const sections: (RuntimeSection & { linear?: boolean })[] = [];
         b.spine.each((section: RuntimeSection & { linear?: boolean }) => { if (section.linear !== false) sections.push(section); });
         const counts: Record<number, number> = {};
         for (const section of sections) {
+          // Whole-book measurement should yield to touch and momentum scrolling.
+          while (!disposed && Date.now() - lastScroll.current < 500) await new Promise(resolve => setTimeout(resolve, 120));
           if (disposed) return;
           await r.display(section.href);
           // Font/image completion can change the section's rendered height.
@@ -238,6 +265,6 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
       return results.slice(0, 100);
     }
   }));
-  return <><div className="epub-viewport-probe" ref={viewportHost} aria-hidden="true" /><div className="epub-host" style={{ filter: `brightness(${props.preferences.brightness / 100})` }} ref={host} /></>;
+  return <><div className="epub-viewport-probe" ref={viewportHost} aria-hidden="true" /><div className="epub-host" ref={host} />{props.preferences.brightness !== 100 && <div className="reading-brightness-shade" aria-hidden="true" style={{ background: props.preferences.brightness < 100 ? "#000" : "#fff", opacity: Math.abs(100 - props.preferences.brightness) / 100 }} />}</>;
 });
 export default EpubReader;

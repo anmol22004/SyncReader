@@ -6,7 +6,7 @@ export default function Modal({ title, close, children, className = '' }: { clas
   const closeRef = useRef(close); closeRef.current = close;
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
-    const first = ref.current?.querySelector<HTMLElement>('button,input,select,textarea,a[href]'); first?.focus();
+    const first = ref.current?.querySelector<HTMLElement>('button,input,select,textarea,a[href]'); first?.focus({ preventScroll: true });
     const key = (event: KeyboardEvent) => {
       if (event.key === 'Escape') closeRef.current();
       if (event.key === 'Tab') {
@@ -17,7 +17,7 @@ export default function Modal({ title, close, children, className = '' }: { clas
       }
     };
     document.addEventListener('keydown', key);
-    return () => { document.removeEventListener('keydown', key); previous?.focus(); };
+    return () => { document.removeEventListener('keydown', key); previous?.focus({ preventScroll: true }); };
   }, []);
   return <div className={`modal-backdrop ${className ? 'reading-sheet-backdrop' : ''}`} onMouseDown={e => { if (e.target === e.currentTarget) close(); }}><div className={`modal ${className}`} ref={ref} role="dialog" aria-modal="true" aria-label={title}><div className="modal-heading"><h2>{title}</h2><button className="icon-button" aria-label="Close dialog" onClick={close}><X size={20} /></button></div>{children}</div></div>;
 }
