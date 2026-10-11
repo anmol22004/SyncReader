@@ -1,0 +1,109 @@
+'use client';
+import { useEffect, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
+import { ArrowLeft, Bookmark, BookOpen, Check, ChevronLeft, ChevronRight, Cloud, Download, Highlighter, List, LoaderCircle, Search, Settings, Trash2, X, ZoomIn, ZoomOut, HardDrive, AlertCircle } from 'lucide-react';
+import type { Annotation, Book, Location, Preferences, Progress, SearchResult } from '@/lib/types';
+import * as service from '@/lib/service';
+import { supabase } from '@/lib/supabase';
+import { clearPending, pendingFor, queuePending } from '@/lib/local';
+import { locationLabel } from '@/lib/locations';
+import { ProgressSync, type SyncState } from '@/lib/sync';
+import { exportMarkdown } from '@/lib/export';
+import type { ReaderHandle, Selection, TocItem } from './reader-engine';
+import Modal from './modal';
+import { PreferenceControls } from './folio';
+const EpubReader = dynamic(() => import('./epub-reader'), { ssr: false });
+const PdfReader = dynamic(() => import('./pdf-reader'), { ssr: false });
+export default function Reader({ book, preferences, changePreferences, close }: { book: Book; preferences: Preferences; changePreferences: (p: Preferences) => Promise<void>; close: () => void }) {
+  const [bytes, setBytes] = useState<ArrayBuffer | null>(null); const [initial, setInitial] = useState<Location | null>(null); const [location, setLocation] = useState<Location | null>(null);
+  const [notes, setNotes] = useState<Annotation[]>([]); const [toc, setToc] = useState<TocItem[]>([]); const [ready, setReady] = useState(false);
+  const [syncState, setSyncState] = useState<SyncState>('synced'); const [conflict, setConflict] = useState<Progress | null>(null); const [syncError, setSyncError] = useState('');
+  const [error, setError] = useState(''); const [selection, setSelection] = useState<Selection | null>(null); const [adding, setAdding] = useState(false);
+  const [noteText, setNoteText] = useState(''); const [highlightOpen, setHighlightOpen] = useState(false); const [editNote, setEditNote] = useState<Annotation | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false); const [panel, setPanel] = useState<'contents' | 'notes' | 'search' | null>(null);
+  const [search, setSearch] = useState(''); const [searching, setSearching] = useState(false); const [searched, setSearched] = useState(false); const [results, setResults] = useState<SearchResult[]>([]);
+  const [zoom, setZoom] = useState(1); const [leaving, setLeaving] = useState(false);
+  const engine = useRef<ReaderHandle>(null); const sync = useRef<ProgressSync | null>(null); const alive = useRef(true); const searchRun = useRef(0);
+  useEffect(() => {
+    alive.current = true;
+    (async () => {
+      try {
+        const [data, session, annotations, pending] = await Promise.all([service.bookBytes(book), service.openSession(book), service.annotations(book.id), pendingFor(book.user_id, book.id)]);
+        if (!alive.current) return;
+        const ctl = new ProgressSync(book.user_id, book.id, session.sessionId, session.progress, {
+          uuid: () => crypto.randomUUID(), send: op => service.saveProgress(book, op), persist: queuePending,
+          reopen: () => service.openSession(book),
+          clear: () => clearPending(book.user_id, book.id),
+          changed: (state, remote, message) => { if (alive.current) { setSyncState(state); setConflict(remote || null); setSyncError(message || ''); } }
+        }, pending);
+        sync.current = ctl; setInitial(ctl.location); setLocation(ctl.location); setNotes(annotations); setBytes(data);
+        if (pending) setSyncState('local');
+      } catch(e) { if (alive.current) setError(e instanceof Error ? e.message : 'Could not open book'); }
+    })();
+    const retry = async () => {
+      await sync.current?.flush();
+      try { const remote = await service.fetchProgress(book.id); if (alive.current) await sync.current?.observeRemote(remote); } catch { /* The pending queue remains on this device. */ }
+    };
+    const visibility = () => { if (document.visibilityState === 'hidden') void sync.current?.flush(); else void retry(); };
+    window.addEventListener('online', retry); document.addEventListener('visibilitychange', visibility);
+    const key = (event: KeyboardEvent) => { if (book.format !== 'pdf') return; const t = event.target as HTMLElement; if (t.closest('input,textarea,select,[role="dialog"]') || event.ctrlKey || event.metaKey || event.altKey) return; if (event.key === 'ArrowRight') { event.preventDefault(); engine.current?.next(); } if (event.key === 'ArrowLeft') { event.preventDefault(); engine.current?.previous(); } };
+    window.addEventListener('keydown', key);
+    return () => { alive.current = false; searchRun.current++; sync.current?.stop(); window.removeEventListener('online', retry); document.removeEventListener('visibilitychange', visibility); window.removeEventListener('keydown', key); };
+  }, [book]);
+  async function leave() { setLeaving(true); await sync.current?.flush(); close(); }
+  function moved(l: Location) { setLocation(l); sync.current?.move(l); }
+  function engineReady(l: Location, navigation: TocItem[]) {
+    setReady(true); setLocation(l); setToc(navigation); if (sync.current && !sync.current.location) sync.current.location = l;
+    void sync.current?.flush();
+    const jump = sessionStorage.getItem(`folio-jump:${book.id}`);
+    if (jump) { sessionStorage.removeItem(`folio-jump:${book.id}`); try { void engine.current?.jump(JSON.parse(jump)); } catch {} }
+  }
+  async function resolve(keepLocal: boolean) {
+    try { const target = await sync.current?.resolve(keepLocal); if (target) { await engine.current?.restore(target); setLocation(target); } } catch(e) { setError(e instanceof Error ? e.message : 'Could not resolve progress'); }
+  }
+  async function addAnnotation(kind: 'bookmark' | 'highlight') {
+    if (!location || kind === 'highlight' && !selection) return; setAdding(true);
+    try {
+      const anchor = kind === 'highlight' ? selection!.anchor : location.type === 'epub' ? { type: 'epub' as const, cfi: location.cfi, href: location.href } : { type: 'pdf' as const, page: location.page, x: location.x, y: location.y, rects: [] };
+      const now = new Date().toISOString();
+      const annotation: Annotation = { id: crypto.randomUUID(), user_id: book.user_id, book_id: book.id, kind, anchor, quote: kind === 'highlight' ? selection!.quote : null, note: kind === 'highlight' ? noteText || null : null, color: 'yellow', revision: 1, created_at: now, updated_at: now, deleted_at: null };
+      const saved = await service.putAnnotation(annotation); if (!alive.current) return;
+      setNotes(n => [...n, saved]); setHighlightOpen(false); setNoteText(''); setSelection(null); window.getSelection()?.removeAllRanges(); setPanel('notes');
+    } catch(e) { setError(e instanceof Error ? e.message : 'Could not save annotation'); }
+    finally { setAdding(false); }
+  }
+  async function deleteAnnotation(a: Annotation) {
+    setAdding(true); try { await service.putAnnotation(a, a.revision, true); setNotes(n => n.filter(x => x.id !== a.id)); } catch(e) { setError(e instanceof Error ? e.message : 'Could not remove annotation'); } finally { setAdding(false); }
+  }
+  async function saveNote() {
+    if (!editNote) return; setAdding(true);
+    try { const a = await service.putAnnotation({ ...editNote, note: noteText || null }, editNote.revision); setNotes(n => n.map(x => x.id === a.id ? a : x)); setEditNote(null); setNoteText(''); } catch(e) { setError(e instanceof Error ? e.message : 'Could not save note'); } finally { setAdding(false); }
+  }
+  async function find(e: React.FormEvent) {
+    e.preventDefault(); if (!search.trim() || !engine.current) return;
+    const run = ++searchRun.current; setSearching(true); setResults([]); setSearched(false);
+    try { const matches = await engine.current.search(search.trim()); if (alive.current && run === searchRun.current) { setResults(matches); setSearched(true); } } catch(e) { if (run === searchRun.current) setError(e instanceof Error ? e.message : 'Search failed'); }
+    finally { if (run === searchRun.current) setSearching(false); }
+  }
+  async function jumpResult(result: SearchResult) {
+    const l = result.location;
+    await engine.current?.jump(l.type === 'epub' ? { type: 'epub', cfi: l.cfi } : { type: 'pdf', page: l.page, x: l.x, y: l.y, rects: [] });
+    if (window.innerWidth < 800) setPanel(null);
+  }
+  function download() { const blob = new Blob([exportMarkdown(book, notes)], { type: 'text/markdown;charset=utf-8' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `${book.title.replace(/[<>:"/\\|?*]/g, '_')}-notes.md`; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
+  const status = syncState === 'synced' ? supabase ? 'Synced' : 'Saved on this device' : syncState === 'saving' ? 'Saving…' : syncState === 'conflict' ? 'Choose a position' : syncState === 'local' ? 'Saved on this device · retrying' : 'Device save unavailable';
+  return <div className={`reader-shell theme-${preferences.theme}`}><header className="reader-toolbar"><button className="reader-back" onClick={() => void leave()} disabled={leaving}><ArrowLeft size={19} /><span>Library</span></button><div className="reader-title"><h1>{book.title}</h1><span>{book.author || book.format.toUpperCase()}</span></div><div className="reader-tools"><button className={panel === 'contents' ? 'icon-button selected' : 'icon-button'} disabled={!ready} aria-label="Table of contents" title="Contents" onClick={() => setPanel(panel === 'contents' ? null : 'contents')}><List size={20} /><span className="contents-label">Contents</span></button><button className={panel === 'search' ? 'icon-button selected' : 'icon-button'} disabled={!ready} aria-label="Search inside book" title="Search" onClick={() => setPanel(panel === 'search' ? null : 'search')}><Search size={19} /></button><button className="icon-button" disabled={!ready || adding} title="Bookmark this position" aria-label="Bookmark this position" onClick={() => void addAnnotation('bookmark')}><Bookmark size={19} /></button><button className={panel === 'notes' ? 'icon-button selected' : 'icon-button'} aria-label="Highlights and bookmarks" title="Notes" onClick={() => setPanel(panel === 'notes' ? null : 'notes')}><Highlighter size={19} /></button><button className="icon-button" aria-label="Reader settings" title="Settings" onClick={() => setSettingsOpen(true)}><Settings size={19} /></button></div></header>
+    {conflict && <div className="conflict-banner" role="alert"><AlertCircle size={19} /><div><strong>A different position is saved on another device.</strong><span>This device: {locationLabel(location)} · Cloud: {locationLabel(conflict.location)}. Which would you like to keep?</span></div><button className="secondary" onClick={() => void resolve(false)}>Use other position</button><button className="primary" onClick={() => void resolve(true)}>Keep this position</button></div>}
+    {error && <div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><X size={17} /></button></div>}
+    <div className="reader-body">{panel && <aside className="reader-panel"><div className="panel-heading"><h2>{panel === 'contents' ? 'Contents' : panel === 'notes' ? 'Your notes' : 'Find in this book'}</h2><button className="icon-button" aria-label="Close reader panel" onClick={() => setPanel(null)}><X size={18} /></button></div>{panel === 'contents' && <div className="toc">{!toc.length && <p className="muted">This book has no linked contents.</p>}{toc.map((item,i) => <button key={`${item.href || item.page}-${i}`} style={{ paddingLeft: 12 + (item.depth || 0) * 18 }} onClick={() => { void engine.current?.goTo(item); if (window.innerWidth < 800) setPanel(null); }}>{item.label}<ChevronRight size={14} /></button>)}</div>}{panel === 'notes' && <><button className="secondary export-button" onClick={download} disabled={!notes.length}><Download size={16} /> Export to Markdown</button>{!notes.length && <p className="muted">Bookmark a page or select a passage to keep it here.</p>}{notes.map(a => <div className="reader-note" key={a.id}><button className="note-jump" onClick={() => { void engine.current?.jump(a.anchor); if (window.innerWidth < 800) setPanel(null); }}><span className="eyebrow">{a.kind} · {a.anchor.type === 'pdf' ? `Page ${a.anchor.page}` : 'EPUB'}</span>{a.quote ? <blockquote>{a.quote}</blockquote> : <p>Saved reading position</p>}{a.note && <p className="note-text">{a.note}</p>}</button><div className="note-actions"><button className="text-button" onClick={() => { setEditNote(a); setNoteText(a.note || ''); }}>Edit note</button><button className="icon-button" disabled={adding} aria-label="Delete annotation" onClick={() => void deleteAnnotation(a)}><Trash2 size={15} /></button></div></div>)}</>}{panel === 'search' && <><form className="book-search" onSubmit={find}><input autoFocus aria-label="Search text" value={search} onChange={e => setSearch(e.target.value)} placeholder="A word or a phrase…" maxLength={200} /><button className="primary" disabled={!ready || searching || !search.trim()}><Search size={16} /> Find</button></form>{searching && <p className="muted" role="status"><LoaderCircle size={15} className="spin" /> Searching the book…</p>}{searched && <p className="muted small">{results.length === 100 ? 'First 100' : results.length} results{!results.length && book.format === 'pdf' ? '. Scanned pages need OCR to be searchable.' : '.'}</p>}{results.map((r,i) => <button className="search-result" key={i} onClick={() => void jumpResult(r)}><span className="eyebrow">{r.label}</span><p>{r.excerpt}</p></button>)}</>}</aside>}
+      <div className={`reading-area ${book.format}`}>
+        {!bytes && <div className="reader-loading">{error ? <><BookOpen size={34} /><h2>This book could not be opened.</h2><button className="secondary" onClick={() => void leave()}>Return to library</button></> : <><LoaderCircle size={26} className="spin" /><p>Opening your next chapter…</p></>}</div>}
+        {bytes && (book.format === 'epub' ? <EpubReader ref={engine} bytes={bytes} initial={initial} preferences={preferences} annotations={notes} onProgress={setLocation} onLocation={moved} onReady={engineReady} onSelection={setSelection} onError={setError} /> : <PdfReader ref={engine} bytes={bytes} initial={initial} annotations={notes} zoom={zoom} onLocation={moved} onReady={engineReady} onSelection={setSelection} onError={setError} />)}
+        {selection && <div className="selection-actions"><Highlighter size={17} /><span>{selection.quote.length} characters selected</span><button className="primary" onClick={() => { setNoteText(''); setHighlightOpen(true); }}>Highlight & note</button><button className="icon-button" aria-label="Clear selection" onClick={() => setSelection(null)}><X size={16} /></button></div>}
+      </div>
+    </div><footer className="reader-footer"><div className={`sync-indicator ${syncState}`} title={syncError} role="status">{syncState === 'saving' ? <LoaderCircle size={14} className="spin" /> : syncState === 'synced' ? <Check size={14} /> : <HardDrive size={14} />}<span>{status}</span>{syncState === 'local' && <button className="text-button" onClick={() => void sync.current?.flush()}>Retry</button>}</div>{book.format === 'pdf' && <div className="reader-pagination"><button className="icon-button" disabled={!ready} aria-label="Previous page" onClick={() => engine.current?.previous()}><ChevronLeft size={21} /></button><span>{locationLabel(location)}{book.page_count ? ` of ${book.page_count}` : ''}</span><button className="icon-button" disabled={!ready} aria-label="Next page" onClick={() => engine.current?.next()}><ChevronRight size={21} /></button></div>}<div className="reader-percent">{book.format === 'pdf' && <><button className="icon-button" aria-label="Zoom out" disabled={zoom <= 0.5} onClick={() => setZoom(z => Math.max(0.5,z-0.1))}><ZoomOut size={17} /></button><span>{Math.round(zoom*100)}%</span><button className="icon-button" aria-label="Zoom in" disabled={zoom >= 2} onClick={() => setZoom(z => Math.min(2,z+0.1))}><ZoomIn size={17} /></button></>}<span>{Math.round((location?.progression || 0) * 1000) / 10}% read</span></div></footer>
+    {settingsOpen && <Modal title="Your reading preferences" close={() => setSettingsOpen(false)}><PreferenceControls preferences={preferences} change={p => void changePreferences(p)} />{book.format === 'pdf' && <p className="muted small">PDF text keeps its original typeface. Use the zoom controls to adjust size. Dark mode preserves the PDF’s original page colors.</p>}</Modal>}
+    {highlightOpen && selection && <Modal title="Keep this passage" close={() => { if (!adding) setHighlightOpen(false); }}><blockquote className="selected-quote">{selection.quote}</blockquote><label>A note to yourself (optional)<textarea value={noteText} onChange={e => setNoteText(e.target.value)} maxLength={20000} rows={4} placeholder="What stood out to you?" /></label><div className="modal-actions"><button className="secondary" onClick={() => setHighlightOpen(false)}>Cancel</button><button className="primary" disabled={adding} onClick={() => void addAnnotation('highlight')}>{adding ? 'Saving…' : 'Save highlight'}</button></div>{supabase && <small className="muted">An internet connection is required to save notes.</small>}</Modal>}
+    {editNote && <Modal title="Edit your note" close={() => { if (!adding) setEditNote(null); }}><label>Note<textarea rows={5} value={noteText} maxLength={20000} onChange={e => setNoteText(e.target.value)} /></label><div className="modal-actions"><button className="primary" disabled={adding} onClick={() => void saveNote()}>Save note</button></div></Modal>}
+  </div>;
+}

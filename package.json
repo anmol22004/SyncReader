@@ -1,0 +1,41 @@
+{
+  "name": "folio-reader",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --hostname 127.0.0.1",
+    "build": "next build --webpack",
+    "start": "next start --hostname 127.0.0.1",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test.mjs",
+    "postinstall": "node scripts/copy-reader-assets.mjs",
+    "setup:cloudflare": "node scripts/setup-cloudflare.mjs",
+    "build:cloudflare": "node scripts/check-cloudflare-env.mjs && node scripts/patch-cloudflare.mjs && opennextjs-cloudflare build",
+    "preview:cloudflare": "npm run build:cloudflare && opennextjs-cloudflare preview",
+    "deploy:cloudflare": "npm run build:cloudflare && opennextjs-cloudflare deploy -- --keep-vars",
+    "deploy:cloudflare:built": "opennextjs-cloudflare deploy -- --keep-vars"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.0.0",
+    "epubjs": "0.3.93",
+    "idb": "^8.0.0",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.468.0",
+    "next": "^16.0.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^5.4.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "server-only": "^0.0.1",
+    "tus-js-client": "^4.0.0",
+    "xml-js": "^1.6.11"
+  },
+  "devDependencies": {
+    "@opennextjs/cloudflare": "^1.20.10",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "~5.9.3",
+    "wrangler": "^4.149.0"
+  }
+}
