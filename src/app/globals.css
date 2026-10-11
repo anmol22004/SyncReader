@@ -36,3 +36,28 @@
 
 /* The scroll viewport spans the reader; chapter text stays centered inside it. */
 .reading-area.epub .epub-host{width:100%;max-width:none}
+
+/* Mobile controls overlay the reading surface; hiding them never reflows text. */
+.epub-viewport-probe{position:fixed;inset:0 0 auto;height:100vh;height:100svh;visibility:hidden;pointer-events:none;z-index:-1}
+.mobile-reader .reader-toolbar{position:fixed;top:0;left:0;right:0;z-index:40;height:76px;min-height:76px;padding-top:env(safe-area-inset-top);transition:transform .2s ease,opacity .2s ease}
+.mobile-reader .reader-footer{position:fixed;bottom:0;left:0;right:0;z-index:40;min-height:56px;height:auto;padding-bottom:env(safe-area-inset-bottom);transition:transform .2s ease,opacity .2s ease}
+.mobile-reader.controls-hidden .reader-toolbar{transform:translateY(-110%);opacity:0;pointer-events:none}
+.mobile-reader.controls-hidden .reader-footer{transform:translateY(110%);opacity:0;pointer-events:none}
+.mobile-reader .reader-panel{position:fixed;top:76px;bottom:56px;left:0;width:310px;max-width:90vw;z-index:45}
+.mobile-reader .selection-actions{position:fixed;z-index:50;bottom:68px}
+.mobile-reader .conflict-banner,.mobile-reader>.error-banner{position:fixed;top:76px;left:0;right:0;z-index:50}
+.mobile-reader .pdf-scroll{padding-top:92px;padding-bottom:80px}
+.show-reader-controls{position:fixed;right:max(12px,env(safe-area-inset-right));bottom:max(12px,env(safe-area-inset-bottom));z-index:40;width:36px;height:36px;border-radius:50%;display:grid;place-items:center;background:var(--surface);color:var(--muted);border:1px solid var(--border);opacity:.6}
+.show-reader-controls:hover,.show-reader-controls:focus-visible{opacity:1}
+.reader-sync-notice{position:fixed;bottom:12px;left:12px;z-index:45;display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:20px;background:var(--surface);color:var(--muted);border:1px solid var(--border);font-size:11px}
+.sync-indicator.synced,.sync-indicator.saving{color:var(--muted);opacity:.65}
+/* Native document scrolling lets mobile browsers collapse their own toolbars. */
+html.reading-document{overflow-y:auto;overflow-x:hidden;overflow-anchor:none;scroll-behavior:auto}
+html.reading-document body{height:auto;overflow:visible;overflow-anchor:none}
+html.reading-document:has(.theme-sepia) body{background:#f3ead8}
+html.reading-document:has(.theme-dark) body{background:#202723}
+.document-reader{display:block;height:auto;min-height:100vh;min-height:100svh;overflow:visible}
+.document-reader .reader-body,.document-reader .reading-area.epub{display:block;min-height:100svh;overflow:visible}
+.document-reader .epub-host{height:auto;overflow:visible;touch-action:pan-y}
+.document-reader .epub-host .epub-container{overflow:visible!important;overscroll-behavior-y:auto}
+@media(prefers-reduced-motion:reduce){.mobile-reader .reader-toolbar,.mobile-reader .reader-footer{transition:none}}

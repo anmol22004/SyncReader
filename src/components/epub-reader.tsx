@@ -8,12 +8,13 @@ type EpubLocation = { start: { cfi: string; href: string; index: number; percent
 // EPUB.js supports a resize anchor at runtime, but omits it from its declarations.
 type AnchoredRendition = Rendition & { resize(width: number, height: number, cfi?: string): void };
 type RuntimeSection = { load: (loader: EpubBook['load']) => Promise<unknown> | Document; find: (q: string) => { cfi: string; excerpt: string }[]; href: string; index: number };
-type Props = { bytes: ArrayBuffer; initial: Location | null; preferences: Preferences; annotations: Annotation[]; onLocation: (l: Location) => void; onProgress: (l: Location) => void; onReady: (l: Location, toc: TocItem[]) => void; onSelection: (s: Selection | null) => void; onError: (e: string) => void };
+type Props = { documentScroll: boolean; onReadingGesture: (delta: number) => void; onToggleControls: () => void; bytes: ArrayBuffer; initial: Location | null; preferences: Preferences; annotations: Annotation[]; onLocation: (l: Location) => void; onProgress: (l: Location) => void; onReady: (l: Location, toc: TocItem[]) => void; onSelection: (s: Selection | null) => void; onError: (e: string) => void };
 const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, ref) {
   const host = useRef<HTMLDivElement>(null); const book = useRef<EpubBook | null>(null); const rendition = useRef<Rendition | null>(null);
   const latest = useRef(props); latest.current = props;
   const armed = useRef(false); const current = useRef<Location | null>(null); const suppressed = useRef(false);
   const [loaded, setLoaded] = useState(false);
+  const viewportHost = useRef<HTMLDivElement>(null);
   const typography = useRef('');
   function location(raw: EpubLocation): Location {
     const length = (book.current?.spine as unknown as { length: number })?.length || 1;
@@ -23,7 +24,7 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
     const r = rendition.current; if (!r) return;
     const p = latest.current.preferences;
     const colors = p.theme === 'dark' ? { color: '#dddcd4', background: '#202723' } : p.theme === 'sepia' ? { color: '#493c29', background: '#f3ead8' } : { color: '#30372f', background: '#fffef9' };
-    r.themes.default({ body: { ...colors, 'font-family': `${p.font} !important`, 'line-height': `${p.lineHeight} !important`, padding: '16px clamp(16px, 4vw, 40px) !important', margin: '0 auto !important', 'max-width': '860px !important', 'box-sizing': 'border-box !important', 'overflow-wrap': 'anywhere', 'overflow-anchor': 'none' }, 'a': { color: '#65876c' }, 'img,svg,video': { 'max-width': '100% !important', height: 'auto !important' }, 'pre': { 'white-space': 'pre-wrap !important' }, 'table': { 'max-width': '100% !important' }, 'h1,h2,h3': { 'line-height': '1.3 !important' } });
+    r.themes.default({ body: { ...colors, 'font-family': `${p.font} !important`, 'line-height': `${p.lineHeight} !important`, padding: `${latest.current.documentScroll ? '88px' : '16px'} clamp(16px, 4vw, 40px) ${latest.current.documentScroll ? '80px' : '16px'} !important`, margin: '0 auto !important', 'max-width': '860px !important', 'box-sizing': 'border-box !important', 'overflow-wrap': 'anywhere', 'overflow-anchor': 'none' }, 'a': { color: '#65876c' }, 'img,svg,video': { 'max-width': '100% !important', height: 'auto !important' }, 'pre': { 'white-space': 'pre-wrap !important' }, 'table': { 'max-width': '100% !important' }, 'h1,h2,h3': { 'line-height': '1.3 !important' } });
     r.themes.fontSize(`${p.fontSize}px`);
   }
   useEffect(() => {
@@ -36,16 +37,29 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
         const { default: ePub } = await import('epubjs'); if (disposed || !host.current) return;
         const b = ePub(props.bytes.slice(0)); book.current = b; ownedBook = b;
         await b.ready; if (disposed) { b.destroy(); return; }
-        const bounds = host.current.getBoundingClientRect();
+        const measure = props.documentScroll ? viewportHost.current! : host.current;
+        const bounds = measure.getBoundingClientRect();
         let width = Math.round(bounds.width); let height = Math.round(bounds.height);
-        const r = b.renderTo(host.current, { width, height, manager: 'continuous', flow: 'scrolled-continuous', spread: 'none', snap: false, resizeOnOrientationChange: false, allowScriptedContent: false }); rendition.current = r;
+        // fullsize is supported by EPUB.js managers but absent from its public types.
+        const options = { width, height, fullsize: props.documentScroll, manager: 'continuous', flow: 'scrolled-continuous', spread: 'none', snap: false, resizeOnOrientationChange: false, allowScriptedContent: false };
+        const r = b.renderTo(host.current, options); rendition.current = r;
         r.hooks.content.register((contents: { document: Document }) => {
+          let touchY: number | null = null;
           const arm = () => { armed.current = true; };
+          contents.document.addEventListener('wheel', event => latest.current.onReadingGesture(event.deltaY), { passive: true });
+          contents.document.addEventListener('touchstart', event => { touchY = event.touches.length === 1 ? event.touches[0].clientY : null; }, { passive: true });
+          contents.document.addEventListener('touchmove', event => {
+            if (event.touches.length !== 1 || touchY === null) { touchY = null; return; }
+            const y = event.touches[0].clientY; latest.current.onReadingGesture(touchY - y); touchY = y;
+          }, { passive: true });
+          contents.document.addEventListener('touchend', () => { touchY = null; }, { passive: true });
+          contents.document.addEventListener('touchcancel', () => { touchY = null; }, { passive: true });
           contents.document.addEventListener('wheel', arm, { passive: true });
           contents.document.addEventListener('touchstart', arm, { passive: true });
           contents.document.addEventListener('keydown', event => { if (['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', ' '].includes(event.key)) arm(); });
           contents.document.addEventListener('click', event => {
             const element = event.target as Element | null; const link = element?.closest('a'); const href = link?.getAttribute('href');
+            if (!link && !contents.document.getSelection()?.toString() && !element?.closest('button,input,textarea,select')) latest.current.onToggleControls();
             if (href && /^https?:/i.test(href)) { event.preventDefault(); event.stopPropagation(); window.open(href, '_blank', 'noopener,noreferrer'); }
           }, true);
 
@@ -107,7 +121,7 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
         // Size changes must not trigger a second, competing display call.
         const updateSize = () => {
             if (disposed || !host.current) return;
-            const bounds = host.current.getBoundingClientRect();
+            const bounds = measure.getBoundingClientRect();
             const nextWidth = Math.round(bounds.width); const nextHeight = Math.round(bounds.height);
             if (nextWidth <= 0 || nextHeight <= 0 || (nextWidth === width && nextHeight === height)) return;
             if (suppressed.current) { resizeTimer = setTimeout(updateSize, 150); return; }
@@ -119,11 +133,11 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
             settleTimer = setTimeout(() => { if (!disposed) suppressed.current = false; }, 600);
         };
         resize = new ResizeObserver(() => { clearTimeout(resizeTimer); resizeTimer = setTimeout(updateSize, 180); });
-        resize.observe(host.current!);
+        resize.observe(measure);
       } catch(e) { if (!disposed) latest.current.onError(e instanceof Error ? e.message : 'This EPUB could not be opened.'); }
     })();
     return () => { disposed = true; inputAbort.abort(); resize?.disconnect(); clearTimeout(resizeTimer); clearTimeout(settleTimer); indexBook?.destroy(); indexBook = null; ownedBook?.destroy(); if (book.current === ownedBook) { rendition.current = null; book.current = null; suppressed.current = false; } };
-  }, [props.bytes]);
+  }, [props.bytes, props.documentScroll]);
   useEffect(() => {
     if (!loaded) return;
     const key = JSON.stringify([props.preferences.font, props.preferences.fontSize, props.preferences.lineHeight]);
@@ -171,6 +185,6 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
       return results.slice(0, 100);
     }
   }));
-  return <div className="epub-host" ref={host} />;
+  return <><div className="epub-viewport-probe" ref={viewportHost} aria-hidden="true" /><div className="epub-host" ref={host} /></>;
 });
 export default EpubReader;
