@@ -1,0 +1,12 @@
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+[functions]
+  directory = "netlify/functions"
+
+# Netlify detects Next.js and installs its framework adapter automatically.
+# Set credentials in the Netlify dashboard, never in this file.
