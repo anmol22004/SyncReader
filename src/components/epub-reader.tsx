@@ -2,29 +2,41 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import type { Book as EpubBook, Rendition } from 'epubjs';
 import type { Anchor, Annotation, Location, Preferences, SearchResult } from '@/lib/types';
+import { fontFor, presetFor, typographyKey } from '@/lib/reading-preferences';
+import { bookPagePosition, type BookPages } from '@/lib/epub-pages';
 import { epubProgress } from '@/lib/locations';
 import type { ReaderHandle, Selection, TocItem } from './reader-engine';
 type EpubLocation = { start: { cfi: string; href: string; index: number; percentage?: number; displayed?: { page: number; total: number } } };
 // EPUB.js supports a resize anchor at runtime, but omits it from its declarations.
 type AnchoredRendition = Rendition & { resize(width: number, height: number, cfi?: string): void };
 type RuntimeSection = { load: (loader: EpubBook['load']) => Promise<unknown> | Document; find: (q: string) => { cfi: string; excerpt: string }[]; href: string; index: number };
-type Props = { documentScroll: boolean; onReadingGesture: (delta: number) => void; onToggleControls: () => void; bytes: ArrayBuffer; initial: Location | null; preferences: Preferences; annotations: Annotation[]; onLocation: (l: Location) => void; onProgress: (l: Location) => void; onReady: (l: Location, toc: TocItem[]) => void; onSelection: (s: Selection | null) => void; onError: (e: string) => void };
+type Props = { documentScroll: boolean; onReadingGesture: (delta: number) => void; onToggleControls: () => void; bytes: ArrayBuffer; initial: Location | null; preferences: Preferences; annotations: Annotation[]; onLocation: (l: Location) => void; onProgress: (l: Location) => void; onChapterRemaining: (screens: number | null) => void; onPages: (pages: BookPages | null) => void; onReady: (l: Location, toc: TocItem[]) => void; onSelection: (s: Selection | null) => void; onError: (e: string) => void };
 const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, ref) {
   const host = useRef<HTMLDivElement>(null); const book = useRef<EpubBook | null>(null); const rendition = useRef<Rendition | null>(null);
   const latest = useRef(props); latest.current = props;
   const armed = useRef(false); const current = useRef<Location | null>(null); const suppressed = useRef(false);
   const [loaded, setLoaded] = useState(false);
   const viewportHost = useRef<HTMLDivElement>(null);
+  const pageCounts = useRef<Record<number, number>>({}); const lastRaw = useRef<EpubLocation | null>(null);
+  const [pageViewport, setPageViewport] = useState({ width: 0, height: 0 });
+  const viewportSize = useRef({ width: 0, height: 0 });
+  function reportPages(raw: EpubLocation) {
+    lastRaw.current = raw;
+    const contents = rendition.current?.getContents() as unknown as { sectionIndex: number; document: Document }[] | undefined;
+    const frame = contents?.find(c => c.sectionIndex === raw.start.index)?.document.defaultView?.frameElement;
+    const top = latest.current.documentScroll ? 0 : host.current?.querySelector('.epub-container')?.getBoundingClientRect().top || 0;
+    const page = frame && viewportSize.current.height ? Math.floor(Math.max(0, top - frame.getBoundingClientRect().top) / viewportSize.current.height) + 1 : raw.start.displayed?.page || 1;
+    latest.current.onPages(bookPagePosition(pageCounts.current, raw.start.index, page));
+  }
   const typography = useRef('');
   function location(raw: EpubLocation): Location {
     const length = (book.current?.spine as unknown as { length: number })?.length || 1;
     return { version: 1, type: 'epub', cfi: raw.start.cfi, href: raw.start.href, spineIndex: raw.start.index, progression: epubProgress(raw.start, length, (book.current?.locations.length() || 0) > 1) };
   }
-  function applyPreferences() {
-    const r = rendition.current; if (!r) return;
-    const p = latest.current.preferences;
-    const colors = p.theme === 'dark' ? { color: '#dddcd4', background: '#202723' } : p.theme === 'sepia' ? { color: '#493c29', background: '#f3ead8' } : { color: '#30372f', background: '#fffef9' };
-    r.themes.default({ body: { ...colors, 'font-family': `${p.font} !important`, 'line-height': `${p.lineHeight} !important`, padding: `${latest.current.documentScroll ? '88px' : '16px'} clamp(16px, 4vw, 40px) ${latest.current.documentScroll ? '80px' : '16px'} !important`, margin: '0 auto !important', 'max-width': '860px !important', 'box-sizing': 'border-box !important', 'overflow-wrap': 'anywhere', 'overflow-anchor': 'none' }, 'a': { color: '#65876c' }, 'img,svg,video': { 'max-width': '100% !important', height: 'auto !important' }, 'pre': { 'white-space': 'pre-wrap !important' }, 'table': { 'max-width': '100% !important' }, 'h1,h2,h3': { 'line-height': '1.3 !important' } });
+  function applyPreferences(r = rendition.current, p = latest.current.preferences) {
+    if (!r) return;
+    const palette = presetFor(p); const colors = { color: palette.color, background: palette.background };
+    r.themes.default({ body: { ...colors, 'font-family': `${fontFor(p)} !important`, 'line-height': `${p.lineHeight} !important`, padding: `${latest.current.documentScroll ? '88px' : '16px'} min(${p.margins}px, 12vw) ${latest.current.documentScroll ? '80px' : '16px'} !important`, margin: '0 auto !important', 'max-width': '860px !important', 'box-sizing': 'border-box !important', 'overflow-wrap': 'anywhere', 'overflow-anchor': 'none', 'font-weight': `${p.bold ? 700 : 400} !important`, 'letter-spacing': `${p.letterSpacing}em !important`, 'word-spacing': `${p.wordSpacing}em !important`, 'text-align': `${p.justify ? 'justify' : 'start'} !important` }, 'p,li,blockquote': { 'font-family': `${fontFor(p)} !important`, 'font-weight': `${p.bold ? 700 : 400} !important`, 'line-height': `${p.lineHeight} !important`, 'letter-spacing': `${p.letterSpacing}em !important`, 'word-spacing': `${p.wordSpacing}em !important`, 'text-align': `${p.justify ? 'justify' : 'start'} !important` }, 'a': { color: '#65876c' }, 'img,svg,video': { 'max-width': '100% !important', height: 'auto !important' }, 'pre': { 'white-space': 'pre-wrap !important' }, 'table': { 'max-width': '100% !important' }, 'h1,h2,h3': { 'line-height': '1.3 !important' } });
     r.themes.fontSize(`${p.fontSize}px`);
   }
   useEffect(() => {
@@ -40,12 +52,13 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
         const measure = props.documentScroll ? viewportHost.current! : host.current;
         const bounds = measure.getBoundingClientRect();
         let width = Math.round(bounds.width); let height = Math.round(bounds.height);
+        viewportSize.current = { width, height }; setPageViewport({ width, height });
         // fullsize is supported by EPUB.js managers but absent from its public types.
         const options = { width, height, fullsize: props.documentScroll, manager: 'continuous', flow: 'scrolled-continuous', spread: 'none', snap: false, resizeOnOrientationChange: false, allowScriptedContent: false };
         const r = b.renderTo(host.current, options); rendition.current = r;
         r.hooks.content.register((contents: { document: Document }) => {
           let touchY: number | null = null;
-          const arm = () => { armed.current = true; };
+          const arm = () => { if (!suppressed.current) armed.current = true; };
           contents.document.addEventListener('wheel', event => latest.current.onReadingGesture(event.deltaY), { passive: true });
           contents.document.addEventListener('touchstart', event => { touchY = event.touches.length === 1 ? event.touches[0].clientY : null; }, { passive: true });
           contents.document.addEventListener('touchmove', event => {
@@ -55,7 +68,7 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
           contents.document.addEventListener('touchend', () => { touchY = null; }, { passive: true });
           contents.document.addEventListener('touchcancel', () => { touchY = null; }, { passive: true });
           contents.document.addEventListener('wheel', arm, { passive: true });
-          contents.document.addEventListener('touchstart', arm, { passive: true });
+          contents.document.addEventListener('touchmove', arm, { passive: true });
           contents.document.addEventListener('keydown', event => { if (['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', ' '].includes(event.key)) arm(); });
           contents.document.addEventListener('click', event => {
             const element = event.target as Element | null; const link = element?.closest('a'); const href = link?.getAttribute('href');
@@ -66,14 +79,15 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
         });
         r.on('relocated', (raw: EpubLocation) => {
           if (disposed || suppressed.current) return;
-          const l = location(raw); current.current = l;
+          const l = location(raw); current.current = l; reportPages(raw);
+          const pages = raw.start.displayed; latest.current.onChapterRemaining(pages && Number.isFinite(pages.total) && Number.isFinite(pages.page) ? Math.max(0, pages.total - pages.page) : null);
           if (armed.current && !suppressed.current) latest.current.onLocation(l);
         });
         r.on('selected', async (cfi: string) => {
           try { const range = await b.getRange(cfi); const quote = range.toString().trim(); if (quote && !disposed) latest.current.onSelection({ anchor: { type: 'epub', cfi }, quote: quote.slice(0, 20000) }); } catch { /* Selection can disappear during navigation. */ }
         });
         applyPreferences();
-        typography.current = JSON.stringify([latest.current.preferences.font, latest.current.preferences.fontSize, latest.current.preferences.lineHeight]);
+        typography.current = typographyKey(latest.current.preferences);
         try { await r.display(resume?.type === 'epub' ? resume.cfi : undefined); }
         catch (e) {
           if (resume?.type !== 'epub' || !resume.href) throw e;
@@ -83,7 +97,7 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
         if (disposed) return;
         await r.reportLocation();
         const raw = (await r.currentLocation()) as unknown as EpubLocation;
-        current.current = location(raw);
+        current.current = location(raw); reportPages(raw);
         const navigation = await b.loaded.navigation; if (disposed) return;
         const toc: TocItem[] = [];
         type NavItem = { label: string; href: string; subitems?: NavItem[] };
@@ -92,10 +106,10 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
         if (!toc.length) b.spine.each((section: RuntimeSection) => { toc.push({ label: `Chapter ${section.index + 1}`, href: section.href, depth: 0 }); });
         latest.current.onReady(current.current, toc);
         setLoaded(true);
-        const armScroll = () => { armed.current = true; };
+        const armScroll = () => { if (!suppressed.current) armed.current = true; };
         host.current?.addEventListener('wheel', armScroll, { passive: true, signal: inputAbort.signal });
-        host.current?.addEventListener('touchstart', armScroll, { passive: true, signal: inputAbort.signal });
-        host.current?.addEventListener('pointerdown', armScroll, { signal: inputAbort.signal });
+        host.current?.addEventListener('touchmove', armScroll, { passive: true, signal: inputAbort.signal });
+        host.current?.addEventListener('pointerdown', event => { if (event.target === host.current?.querySelector('.epub-container')) armScroll(); }, { signal: inputAbort.signal });
         // Index a separate book: Locations.generate unloads sections, so it must
         // never run on the instance that owns the visible chapters.
         void (async () => {
@@ -107,7 +121,6 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
             if (disposed) return;
             b.locations.load(indexing.locations.save());
             // Recalculate the visible percentage without navigating or reflowing.
-            await r.reportLocation();
             if (disposed) return;
             const raw = r.currentLocation() as unknown as EpubLocation;
             if (!suppressed.current && raw?.start) {
@@ -125,9 +138,9 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
             const nextWidth = Math.round(bounds.width); const nextHeight = Math.round(bounds.height);
             if (nextWidth <= 0 || nextHeight <= 0 || (nextWidth === width && nextHeight === height)) return;
             if (suppressed.current) { resizeTimer = setTimeout(updateSize, 150); return; }
-            width = nextWidth; height = nextHeight;
+            width = nextWidth; height = nextHeight; viewportSize.current = { width, height }; setPageViewport({ width, height });
             const cfi = current.current?.type === 'epub' ? current.current.cfi : undefined;
-            suppressed.current = true;
+            armed.current = false; suppressed.current = true;
             (r as AnchoredRendition).resize(width, height, cfi);
             clearTimeout(settleTimer);
             settleTimer = setTimeout(() => { if (!disposed) suppressed.current = false; }, 600);
@@ -140,12 +153,12 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
   }, [props.bytes, props.documentScroll]);
   useEffect(() => {
     if (!loaded) return;
-    const key = JSON.stringify([props.preferences.font, props.preferences.fontSize, props.preferences.lineHeight]);
+    const key = typographyKey(props.preferences);
     if (key === typography.current) return;
     const r = rendition.current; if (!r) return;
     const cfi = current.current?.type === 'epub' ? current.current.cfi : undefined;
     // Coalesce slider changes and preserve the anchor through text reflow.
-    suppressed.current = true;
+    armed.current = false; suppressed.current = true;
     let disposed = false;
     const timer = setTimeout(() => {
       if (disposed) return;
@@ -153,8 +166,8 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
       void r.display(cfi).then(() => { if (!disposed) suppressed.current = false; }).catch(() => { if (!disposed) suppressed.current = false; });
     }, 180);
     return () => { disposed = true; clearTimeout(timer); suppressed.current = false; };
-  }, [loaded, props.preferences.font, props.preferences.fontSize, props.preferences.lineHeight]);
-  useEffect(() => { if (loaded) applyPreferences(); }, [loaded, props.preferences.theme]);
+  }, [loaded, props.preferences.font, props.preferences.fontSize, props.preferences.lineHeight, props.preferences.bold, props.preferences.letterSpacing, props.preferences.wordSpacing, props.preferences.margins, props.preferences.justify]);
+  useEffect(() => { if (loaded) applyPreferences(); }, [loaded, props.preferences.theme, props.preferences.preset]);
   useEffect(() => {
     const r = rendition.current; if (!r) return;
     const added: string[] = [];
@@ -163,10 +176,50 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
     }
     return () => { for (const cfi of added) { try { r.annotations.remove(cfi, 'highlight'); } catch {} } };
   }, [props.annotations, loaded]);
+  useEffect(() => {
+    if (!loaded || !pageViewport.width || !pageViewport.height) return;
+    let disposed = false; let counter: EpubBook | null = null;
+    const surface = document.createElement('div');
+    Object.assign(surface.style, { position: 'fixed', left: '-100000px', top: '0', width: `${pageViewport.width}px`, height: `${pageViewport.height}px`, visibility: 'hidden', pointerEvents: 'none', overflow: 'hidden' });
+    surface.setAttribute('aria-hidden', 'true'); document.body.appendChild(surface);
+    pageCounts.current = {}; latest.current.onPages(null);
+    // Measure chapters in an independent renderer so counting never moves the book.
+    const timer = setTimeout(() => { void (async () => {
+      try {
+        const { default: ePub } = await import('epubjs'); if (disposed) return;
+        const b = ePub(props.bytes.slice(0)); counter = b; await b.ready; if (disposed) return;
+        const r = b.renderTo(surface, { width: pageViewport.width, height: pageViewport.height, manager: 'default', flow: 'scrolled-continuous', spread: 'none', allowScriptedContent: false, resizeOnOrientationChange: false });
+        applyPreferences(r, props.preferences);
+        const sections: (RuntimeSection & { linear?: boolean })[] = [];
+        b.spine.each((section: RuntimeSection & { linear?: boolean }) => { if (section.linear !== false) sections.push(section); });
+        const counts: Record<number, number> = {};
+        for (const section of sections) {
+          if (disposed) return;
+          await r.display(section.href);
+          // Font/image completion can change the section's rendered height.
+          const contents = r.getContents() as unknown as { document: Document }[];
+          await Promise.all(contents.map(async content => {
+            const ready = Promise.all([content.document.fonts?.ready, ...Array.from(content.document.images).map(img => img.decode?.().catch(() => {}))]);
+            let timeout: ReturnType<typeof setTimeout> | undefined;
+            try { await Promise.race([ready, new Promise(resolve => { timeout = setTimeout(resolve, 3000); })]); } finally { clearTimeout(timeout); }
+          }));
+          await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+          if (disposed) return;
+          const raw = r.currentLocation() as unknown as EpubLocation;
+          const count = raw?.start?.displayed?.total;
+          if (!count || !Number.isFinite(count)) throw new Error('Section could not be measured');
+          counts[section.index] = Math.max(1, Math.ceil(count));
+        }
+        if (!disposed) { pageCounts.current = counts; if (lastRaw.current) reportPages(lastRaw.current); }
+      } catch { /* Keep the progress percentage if a book cannot be measured. */ }
+      finally { if (counter) { counter.destroy(); counter = null; } surface.remove(); }
+    })(); }, 350);
+    return () => { disposed = true; clearTimeout(timer); counter?.destroy(); counter = null; surface.remove(); };
+  }, [loaded, props.bytes, pageViewport.width, pageViewport.height, props.documentScroll, props.preferences.font, props.preferences.fontSize, props.preferences.lineHeight, props.preferences.bold, props.preferences.letterSpacing, props.preferences.wordSpacing, props.preferences.margins, props.preferences.justify]);
   useImperativeHandle(ref, () => ({
     next() {},
     previous() {},
-    async restore(l) { if (l.type !== 'epub' || !rendition.current) return; suppressed.current = true; try { await rendition.current.display(l.cfi); current.current = l; } finally { suppressed.current = false; } },
+    async restore(l) { if (l.type !== 'epub' || !rendition.current) return; armed.current = false; suppressed.current = true; try { await rendition.current.display(l.cfi); current.current = l; } finally { suppressed.current = false; } },
     async jump(a: Anchor) { if (a.type === 'epub') { armed.current = true; await rendition.current?.display(a.cfi); } },
     async goTo(t) { if (t.href) { armed.current = true; await rendition.current?.display(t.href); } },
     async search(query) {
@@ -185,6 +238,6 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
       return results.slice(0, 100);
     }
   }));
-  return <><div className="epub-viewport-probe" ref={viewportHost} aria-hidden="true" /><div className="epub-host" ref={host} /></>;
+  return <><div className="epub-viewport-probe" ref={viewportHost} aria-hidden="true" /><div className="epub-host" style={{ filter: `brightness(${props.preferences.brightness / 100})` }} ref={host} /></>;
 });
 export default EpubReader;

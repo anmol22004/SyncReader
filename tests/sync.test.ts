@@ -37,8 +37,8 @@ test('changes during an in-flight request coalesce and save after its acknowledg
   let complete!: (r: SaveResult) => void; let first = true;
   const f = fixture(async o => { if (first) { first = false; return new Promise(resolve => { complete = resolve; }); } return { outcome: 'accepted', progress: { ...start(), revision: 3, location: o.location } }; }); t.after(() => f.sync.stop());
   f.sync.move(at(10)); const request = f.sync.flush(); while (!complete) await new Promise(resolve => setImmediate(resolve));
-  f.sync.move(at(11)); f.sync.move(at(12)); await f.sync.flush(); assert.equal(f.calls.length, 1);
-  complete({ outcome: 'accepted', progress: { ...start(), revision: 2, location: at(10) } }); await request;
+  f.sync.move(at(11)); f.sync.move(at(12)); const closing = f.sync.flush(); assert.equal(f.calls.length, 1);
+  complete({ outcome: 'accepted', progress: { ...start(), revision: 2, location: at(10) } }); await Promise.all([request, closing]);
   assert.equal(f.calls.length, 2); assert.deepEqual(f.calls[1].location, at(12)); assert.equal(f.calls[1].expectedRevision, 2); assert.equal(f.saved(), null);
 });
 test('a revision conflict does not automatically overwrite the other device', async t => {
@@ -62,6 +62,36 @@ test('observing another device prompts a choice without moving the active reader
   const f = fixture(); t.after(() => f.sync.stop()); await f.sync.observeRemote({ ...start(), revision: 9, location: at(90) }); assert.deepEqual(f.sync.location, at(2)); assert.equal(f.states.at(-1), 'conflict'); assert.equal(f.calls.length, 0);
 });
 test('a stopped controller cannot issue new saves', async () => { const f = fixture(); f.sync.stop(); f.sync.move(at(10)); await f.sync.flush(); assert.equal(f.calls.length, 0); });
+
+test('leaving waits for an in-flight save and its latest queued position', async t => {
+  let complete!: (r: SaveResult) => void; let first = true; let closed = false;
+  const f = fixture(async o => {
+    if (first) { first = false; return new Promise(resolve => { complete = resolve; }); }
+    return { outcome: 'accepted', progress: { ...start(), revision: 3, location: o.location } };
+  }); t.after(() => f.sync.stop());
+  f.sync.move(at(10)); const saving = f.sync.flush();
+  while (!complete) await new Promise(resolve => setImmediate(resolve));
+  f.sync.move(at(20)); const leaving = f.sync.flush().then(() => { closed = true; });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(closed, false);
+  complete({ outcome: 'accepted', progress: { ...start(), revision: 2, location: at(10) } });
+  await Promise.all([saving, leaving]); assert.equal(closed, true); assert.deepEqual(f.calls.at(-1)?.location, at(20)); assert.equal(f.saved(), null);
+});
+
+test('an old accepted receipt cannot roll back a newer position loaded from cloud', async t => {
+  const op: Operation = { operationId: 'old-operation', sessionId: 'old-session', sequence: 1, expectedRevision: 1, location: at(10) };
+  const cloud = { ...start(), revision: 9, location: at(90) }; let cleared = false; const states: SyncState[] = [];
+  const sync = new ProgressSync('user','book','new-session',cloud, {
+    uuid: () => 'new-operation', persist: async () => {}, clear: async () => { cleared = true; }, changed: s => states.push(s),
+    send: async () => ({ outcome: 'accepted', progress: { ...start(), revision: 2, location: at(10) } })
+  }, { key:'user:book', userId:'user', bookId:'book', operation:op, savedAt:new Date().toISOString() });
+  t.after(() => sync.stop()); await sync.flush(); assert.equal(sync.progress.revision, 9); assert.equal(states.at(-1), 'conflict');
+  assert.deepEqual(await sync.resolve(false), at(90)); assert.equal(cleared, true);
+});
+
+test('an out-of-order cloud response cannot replace a newer revision', async t => {
+  const f = fixture(); t.after(() => f.sync.stop()); f.sync.move(at(20)); await f.sync.flush();
+  await f.sync.observeRemote(start()); assert.equal(f.sync.progress.revision, 2); assert.equal(f.states.at(-1), 'synced');
+});
 test('failed device persistence is never labelled as saved on this device', async t => {
   const states: SyncState[] = []; let sends = 0;
   const sync = new ProgressSync('user','book','session',start(),{uuid:()=> 'id',persist:async()=>{throw new Error('quota');},clear:async()=>{},changed:s=>states.push(s),send:async()=>{sends++;return {outcome:'accepted',progress:start()};}});

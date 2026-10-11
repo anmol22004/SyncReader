@@ -15,6 +15,7 @@ export class ProgressSync {
   private operation: Operation | null = null;
   private nextLocation: Location | null = null;
   private running = false;
+  private waiters: (() => void)[] = [];
   private stopped = false;
   private conflict: Progress | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -45,7 +46,11 @@ export class ProgressSync {
     if (!this.timer) this.timer = setTimeout(() => { this.timer = null; void this.flush(); }, 800);
   }
   async flush(): Promise<void> {
-    if (this.running || this.stopped || this.conflict || !this.operation) return;
+    if (this.running) {
+      await new Promise<void>(resolve => this.waiters.push(resolve));
+      return this.flush();
+    }
+    if (this.stopped || this.conflict || !this.operation) return;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.running = true;
@@ -56,6 +61,11 @@ export class ProgressSync {
       persisted = true;
       const result = await this.deps.send(this.operation);
       if (this.stopped) return;
+      // Idempotent receipts describe the original save, not today's cloud state.
+      // Never let an old acknowledgement roll back the revision read at opening.
+      if (result.progress.revision < this.progress.revision) {
+        this.conflict = this.progress; this.deps.changed('conflict', this.progress); return;
+      }
       if (result.outcome !== 'accepted') {
         this.conflict = result.progress; this.deps.changed('conflict', result.progress); return;
       }
@@ -81,6 +91,7 @@ export class ProgressSync {
       if (!this.stopped) this.deps.changed(persisted && this.operation ? 'local' : 'error', undefined, e instanceof Error ? e.message : 'Save failed');
     } finally {
       this.running = false;
+      const waiters = this.waiters.splice(0); for (const resolve of waiters) resolve();
     }
     if (this.operation && !this.conflict && !this.stopped) {
       if (accepted) return this.flush();
@@ -89,7 +100,7 @@ export class ProgressSync {
     }
   }
   async observeRemote(remote: Progress) {
-    if (this.stopped || this.running || remote.revision === this.progress.revision) return;
+    if (this.stopped || this.running || remote.revision <= this.progress.revision) return;
     if (sameLocation(remote.location, this.location) && !this.operation) { this.progress = remote; return; }
     this.conflict = remote;
     if (this.location && !this.operation) { this.operation = this.newOperation(this.location); await this.snapshot(); }

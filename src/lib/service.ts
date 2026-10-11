@@ -1,3 +1,4 @@
+import { readDevicePreferences, writeDevicePreferences } from './reading-preferences';
 import { supabase } from './supabase';
 import { db, LOCAL_USER, localBooks, localProgress, localAnnotations, clearPending, pruneLocalStorageIfDue } from './local';
 import type { Annotation, Book, Operation, Preferences, Progress, SaveResult } from './types';
@@ -135,11 +136,9 @@ export async function deleteBook(book: Book) {
   for (const key of await tx.objectStore('receipts').getAllKeys()) { const receipt: SaveResult = await tx.objectStore('receipts').get(key); if (receipt.progress.book_id === book.id) await tx.objectStore('receipts').delete(key); }
   await tx.objectStore('outbox').delete(`${book.user_id}:${book.id}`); await tx.done;
 }
-export async function getPreferences(userId: string): Promise<Preferences | null> {
-  if (supabase) { const r = await supabase.from('reader_preferences').select('preferences').eq('user_id', userId).maybeSingle(); if (r.error) throw new Error(r.error.message); return r.data?.preferences || null; }
-  try { return JSON.parse(localStorage.getItem(`folio-preferences:${userId}`) || 'null'); } catch { return null; }
+export async function getPreferences(userId: string): Promise<Preferences> {
+  return readDevicePreferences(localStorage, userId);
 }
 export async function setPreferences(userId: string, preferences: Preferences) {
-  if (supabase) check(await supabase.rpc('set_preferences', { p_preferences: preferences }));
-  localStorage.setItem(`folio-preferences:${userId}`, JSON.stringify(preferences));
+  writeDevicePreferences(localStorage, userId, preferences);
 }

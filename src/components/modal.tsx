@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
-export default function Modal({ title, close, children }: { title: string; close: () => void; children: React.ReactNode }) {
+export default function Modal({ title, close, children, className = '' }: { className?: string; title: string; close: () => void; children: React.ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   const closeRef = useRef(close); closeRef.current = close;
   useEffect(() => {
@@ -19,5 +19,5 @@ export default function Modal({ title, close, children }: { title: string; close
     document.addEventListener('keydown', key);
     return () => { document.removeEventListener('keydown', key); previous?.focus(); };
   }, []);
-  return <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) close(); }}><div className="modal" ref={ref} role="dialog" aria-modal="true" aria-label={title}><div className="modal-heading"><h2>{title}</h2><button className="icon-button" aria-label="Close dialog" onClick={close}><X size={20} /></button></div>{children}</div></div>;
+  return <div className={`modal-backdrop ${className ? 'reading-sheet-backdrop' : ''}`} onMouseDown={e => { if (e.target === e.currentTarget) close(); }}><div className={`modal ${className}`} ref={ref} role="dialog" aria-modal="true" aria-label={title}><div className="modal-heading"><h2>{title}</h2><button className="icon-button" aria-label="Close dialog" onClick={close}><X size={20} /></button></div>{children}</div></div>;
 }

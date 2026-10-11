@@ -20,8 +20,8 @@ export type Annotation = {
   anchor: Anchor; quote: string | null; note: string | null; color: string;
   revision: number; created_at: string; updated_at: string; deleted_at: string | null;
 };
-export type Preferences = { theme: 'light' | 'dark' | 'sepia'; font: 'serif' | 'sans-serif'; fontSize: number; lineHeight: number };
-export const DEFAULT_PREFERENCES: Preferences = { theme: 'light', font: 'serif', fontSize: 19, lineHeight: 1.7 };
+export type Preferences = { theme: 'light' | 'dark' | 'sepia'; preset: 'original' | 'quiet' | 'paper' | 'bold' | 'calm' | 'focus'; font: 'serif' | 'sans-serif' | 'georgia' | 'palatino' | 'times' | 'arial' | 'verdana'; fontSize: number; lineHeight: number; bold: boolean; letterSpacing: number; wordSpacing: number; margins: number; justify: boolean; brightness: number };
+export const DEFAULT_PREFERENCES: Preferences = { theme: 'light', preset: 'original', font: 'serif', fontSize: 19, lineHeight: 1.7, bold: false, letterSpacing: 0, wordSpacing: 0, margins: 24, justify: false, brightness: 100 };
 export type Operation = {
   operationId: string; sessionId: string; sequence: number; expectedRevision: number;
   location: Location;

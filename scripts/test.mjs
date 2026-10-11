@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 const require = createRequire(import.meta.url);
 const ts = require('typescript');
 // Compile the dependency-free core to CommonJS, then run Node's native test runner.
-const files = ['src/lib/types.ts','src/lib/auth-actions.ts','src/lib/reader-chrome.ts','src/lib/retention.ts','src/lib/locations.ts','src/lib/sync.ts','src/lib/export.ts','src/server/validate-book.ts','src/app/api/sample/route.ts', ...(await readdir('tests')).filter(f => f.endsWith('.test.ts')).map(f => `tests/${f}`)];
+const files = ['src/lib/types.ts','src/lib/epub-pages.ts','src/lib/reading-preferences.ts','src/lib/auth-actions.ts','src/lib/reader-chrome.ts','src/lib/retention.ts','src/lib/locations.ts','src/lib/sync.ts','src/lib/export.ts','src/server/validate-book.ts','src/app/api/sample/route.ts', ...(await readdir('tests')).filter(f => f.endsWith('.test.ts')).map(f => `tests/${f}`)];
 for (const file of files) {
   const result = ts.transpileModule(await readFile(file, 'utf8'), { fileName: file, reportDiagnostics: true, compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } });
   if (result.diagnostics?.length) throw new Error(ts.formatDiagnosticsWithColorAndContext(result.diagnostics, { getCurrentDirectory: () => process.cwd(), getCanonicalFileName: f => f, getNewLine: () => '\n' }));
