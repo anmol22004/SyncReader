@@ -3860,3 +3860,6 @@ html.reading-document:has(.theme-dark) body {
         padding-top: 8px
     }
 }
+/* Opt-in diagnostics overlay; fixed geometry keeps it outside book layout. */
+.reader-debug{position:fixed;left:8px;bottom:82px;z-index:100;max-width:min(360px,calc(100vw - 24px));padding:8px 10px;border-radius:10px;background:#203629;color:#fff;box-shadow:0 2px 12px #0003;font:12px/1.4 system-ui;overflow-wrap:anywhere}
+.reader-debug small{display:block;font-size:10px;margin-bottom:5px}.reader-debug button{background:#fff;color:#203629;border-radius:6px;padding:9px 10px;margin:2px;min-height:36px;font:600 12px system-ui}.reader-debug textarea{width:100%;max-height:110px;color:#111;background:#fff}

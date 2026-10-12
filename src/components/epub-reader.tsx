@@ -7,6 +7,10 @@ import { applyEpubAppearance } from '@/lib/epub-appearance';
 import { stabilizeContinuousScroll, type ContinuousScrollManager } from '@/lib/epub-scroll';
 import { bookPagePosition, type BookPages } from '@/lib/epub-pages';
 import { epubProgress } from '@/lib/locations';
+import { ReaderTrace, readerTraceEnabled } from '@/lib/reader-trace';
+import { attachEpubDiagnostics } from '@/lib/epub-diagnostics';
+import { createSelectionObserver, type SelectionContents } from '@/lib/epub-selection';
+import ReaderDebug from './reader-debug';
 import type { ReaderHandle, Selection, TocItem } from './reader-engine';
 type EpubLocation = { start: { cfi: string; href: string; index: number; percentage?: number; displayed?: { page: number; total: number } } };
 // EPUB.js supports a resize anchor at runtime, but omits it from its declarations.
@@ -20,6 +24,8 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
   const armed = useRef(false); const current = useRef<Location | null>(null); const suppressed = useRef(false);
   const lastScroll = useRef(0);
   const [loaded, setLoaded] = useState(false);
+  const trace = useRef<ReaderTrace | null>(null);
+  const [debugTrace, setDebugTrace] = useState<ReaderTrace | null>(null);
   const viewportHost = useRef<HTMLDivElement>(null);
   const pageCounts = useRef<Record<number, number>>({}); const lastRaw = useRef<EpubLocation | null>(null);
   const [pageViewport, setPageViewport] = useState({ width: 0, height: 0 });
@@ -40,6 +46,7 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
   const rendererPreferences = useRef(new WeakMap<Rendition, Preferences>());
   function applyPreferences(r = rendition.current, p = latest.current.preferences) {
     if (!r) return;
+    if (r === rendition.current) trace.current?.record('appearance', { fontSize: p.fontSize, lineHeight: p.lineHeight, margins: p.margins, bold: p.bold, justify: p.justify, letterSpacing: p.letterSpacing, wordSpacing: p.wordSpacing });
     const settings = rendererPreferences.current;
     if (!settings.has(r)) r.hooks.content.register((contents: { document: Document }) => {
       applyEpubAppearance(contents.document, settings.get(r)!, latest.current.documentScroll);
@@ -52,7 +59,21 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
     const resume = current.current || props.initial;
     armed.current = false; setLoaded(false);
     const inputAbort = new AbortController();
+    const ownedTrace = readerTraceEnabled(window.location.search) ? new ReaderTrace({ build: process.env.NEXT_PUBLIC_READER_BUILD || 'local', builtAt: process.env.NEXT_PUBLIC_READER_BUILT_AT || '', userAgent: navigator.userAgent }) : null;
+    trace.current = ownedTrace; setDebugTrace(ownedTrace);
+    let stopDiagnostics: (() => void) | undefined;
+    let selectionPoll: ReturnType<typeof setInterval> | undefined;
+    let selectionTimer: ReturnType<typeof setTimeout> | undefined;
     let disposed = false; let resize: ResizeObserver | null = null; let resizeTimer: ReturnType<typeof setTimeout> | undefined; let settleTimer: ReturnType<typeof setTimeout> | undefined; let ownedBook: EpubBook | null = null; let indexBook: EpubBook | null = null; let stopScroll: (() => void) | undefined;
+    const observeSelection = createSelectionObserver(selected => {
+      ownedTrace?.record('selection', { valid: !!selected });
+      latest.current.onSelection(selected);
+    });
+    function captureSelection() {
+      if (disposed || document.hidden || document.querySelector('.selected-quote')) return;
+      const contents = rendition.current?.getContents() as unknown as SelectionContents[] | undefined;
+      observeSelection(contents || []);
+    }
     (async () => {
       try {
         const { default: ePub } = await import('epubjs'); if (disposed || !host.current) return;
@@ -69,16 +90,22 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
         stopScroll = stabilizeContinuousScroll((r as ManagedRendition).manager, height, document => {
           applyEpubAppearance(document, rendererPreferences.current.get(r) || latest.current.preferences, props.documentScroll);
         });
+        if (ownedTrace) stopDiagnostics = attachEpubDiagnostics(r, ownedTrace);
+        // Run in the parent so selection works even when WebKit blocks iframe events.
+        selectionPoll = setInterval(captureSelection, 250);
         const markScroll = () => { lastScroll.current = Date.now(); };
         window.addEventListener('scroll', markScroll, { passive: true, capture: true, signal: inputAbort.signal });
-        r.hooks.content.register((contents: { document: Document }) => {
+        r.hooks.content.register((contents: SelectionContents) => {
           let touchY: number | null = null;
           const arm = () => { lastScroll.current = Date.now(); if (!suppressed.current) armed.current = true; };
-          contents.document.addEventListener('selectionchange', () => {
-            if (document.querySelector('.selected-quote')) return;
-            const selected = contents.document.getSelection();
-            if (!selected || selected.isCollapsed || !selected.toString().trim()) latest.current.onSelection(null);
-          });
+          const selectionChanged = () => {
+            clearTimeout(selectionTimer);
+            selectionTimer = setTimeout(captureSelection, 60);
+          };
+          contents.document.addEventListener('selectionchange', selectionChanged);
+          contents.document.addEventListener('touchend', selectionChanged, { passive: true });
+          contents.document.addEventListener('pointerup', selectionChanged, { passive: true });
+          contents.document.addEventListener('keyup', selectionChanged);
           contents.document.addEventListener('wheel', event => { if (!event.ctrlKey && !event.metaKey) latest.current.onReadingGesture(event.deltaY); }, { passive: true });
           contents.document.addEventListener('touchstart', event => { lastScroll.current = Date.now(); touchY = event.touches.length === 1 ? event.touches[0].clientY : null; }, { passive: true });
           contents.document.addEventListener('touchmove', event => {
@@ -108,9 +135,10 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
           const pages = raw.start.displayed; latest.current.onChapterRemaining(pages && Number.isFinite(pages.total) && Number.isFinite(pages.page) ? Math.max(0, pages.total - pages.page) : null);
           if (armed.current && !suppressed.current) latest.current.onLocation(l);
         });
-        r.on('selected', async (cfi: string) => {
-          try { const range = await b.getRange(cfi); const quote = range.toString().trim(); if (quote && !disposed) latest.current.onSelection({ anchor: { type: 'epub', cfi }, quote: quote.slice(0, 20000) }); } catch { /* Selection can disappear during navigation. */ }
-        });
+        // EPUB.js supplies the visible Contents as its second argument. Resolving
+        // the selection against Book.getRange uses a different XML document and
+        // can silently fail in Safari. Read the live iframe selection directly.
+        r.on('selected', captureSelection);
         applyPreferences();
         typography.current = typographyKey(latest.current.preferences);
         try { await r.display(resume?.type === 'epub' ? resume.cfi : undefined); }
@@ -148,7 +176,9 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
             indexing.spine.hooks.content.register(async () => {
               while (!disposed && Date.now() - lastScroll.current < 1000) await new Promise(resolve => setTimeout(resolve, 120));
             });
+            ownedTrace?.record('index-start');
             await indexing.locations.generate(1200);
+            ownedTrace?.record('index-end');
             if (disposed) return;
             b.locations.load(indexing.locations.save());
             // Recalculate the visible percentage without navigating or reflowing.
@@ -184,7 +214,7 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
         resize.observe(measure);
       } catch(e) { if (!disposed) latest.current.onError(e instanceof Error ? e.message : 'This EPUB could not be opened.'); }
     })();
-    return () => { disposed = true; stopScroll?.(); inputAbort.abort(); resize?.disconnect(); clearTimeout(resizeTimer); clearTimeout(settleTimer); indexBook?.destroy(); indexBook = null; ownedBook?.destroy(); if (book.current === ownedBook) { rendition.current = null; book.current = null; suppressed.current = false; } };
+    return () => { disposed = true; clearTimeout(selectionTimer); clearInterval(selectionPoll); stopDiagnostics?.(); ownedTrace?.capture(); if (trace.current === ownedTrace) trace.current = null; stopScroll?.(); inputAbort.abort(); resize?.disconnect(); clearTimeout(resizeTimer); clearTimeout(settleTimer); indexBook?.destroy(); indexBook = null; ownedBook?.destroy(); if (book.current === ownedBook) { rendition.current = null; book.current = null; suppressed.current = false; } };
   }, [props.bytes, props.documentScroll]);
   useEffect(() => {
     if (!loaded) return;
@@ -223,6 +253,7 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
       try {
         const { default: ePub } = await import('epubjs'); if (disposed) return;
         const b = ePub(props.bytes.slice(0)); counter = b; await b.ready; if (disposed) return;
+        trace.current?.record('count-start');
         const r = b.renderTo(surface, { width: pageViewport.width, height: pageViewport.height, manager: 'default', flow: 'scrolled-continuous', spread: 'none', allowScriptedContent: false, resizeOnOrientationChange: false });
         await r.started; if (disposed) return;
         applyPreferences(r, props.preferences);
@@ -233,6 +264,7 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
           // Whole-book measurement should yield to touch and momentum scrolling.
           while (!disposed && Date.now() - lastScroll.current < 1000) await new Promise(resolve => setTimeout(resolve, 120));
           if (disposed) return;
+          trace.current?.record('count-section', { chapter: section.index });
           await r.display(section.href);
           // Font/image completion can change the section's rendered height.
           const contents = r.getContents() as unknown as { document: Document }[];
@@ -248,7 +280,7 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
           if (!count || !Number.isFinite(count)) throw new Error('Section could not be measured');
           counts[section.index] = Math.max(1, Math.ceil(count));
         }
-        if (!disposed) { pageCounts.current = counts; if (lastRaw.current) reportPages(lastRaw.current); }
+        if (!disposed) { trace.current?.record('count-end'); pageCounts.current = counts; if (lastRaw.current) reportPages(lastRaw.current); }
       } catch { /* Keep the progress percentage if a book cannot be measured. */ }
       finally { if (counter) { counter.destroy(); counter = null; } surface.remove(); }
     })(); }, 350);
@@ -276,6 +308,6 @@ const EpubReader = forwardRef<ReaderHandle, Props>(function EpubReader(props, re
       return results.slice(0, 100);
     }
   }));
-  return <><div className="epub-viewport-probe" ref={viewportHost} aria-hidden="true" /><div className="epub-host" ref={host} />{props.preferences.brightness !== 100 && <div className="reading-brightness-shade" aria-hidden="true" style={{ background: props.preferences.brightness < 100 ? "#000" : "#fff", opacity: Math.abs(100 - props.preferences.brightness) / 100 }} />}</>;
+  return <><div className="epub-viewport-probe" ref={viewportHost} aria-hidden="true" /><div className="epub-host" ref={host} />{props.preferences.brightness !== 100 && <div className="reading-brightness-shade" aria-hidden="true" style={{ background: props.preferences.brightness < 100 ? "#000" : "#fff", opacity: Math.abs(100 - props.preferences.brightness) / 100 }} />}{debugTrace && <ReaderDebug trace={debugTrace} />}</>;
 });
 export default EpubReader;

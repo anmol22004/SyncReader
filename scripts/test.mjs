@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 const require = createRequire(import.meta.url);
 const ts = require('typescript');
 // Compile core helpers and test fixtures to CommonJS, then run Node's test runner.
-const files = ['src/lib/types.ts','src/lib/reading-preferences.ts','src/lib/auth-actions.ts','src/lib/reader-chrome.ts','src/lib/epub-pages.ts','src/lib/epub-scroll.ts','src/lib/retention.ts','src/lib/locations.ts','src/lib/sync.ts','src/lib/export.ts','src/server/validate-book.ts','src/app/api/sample/route.ts', ...(await readdir('tests')).filter(f => f.endsWith('.test.ts')).map(f => `tests/${f}`)];
+const files = ['src/lib/types.ts','src/lib/epub-selection.ts','src/lib/reader-trace.ts','src/lib/reading-preferences.ts','src/lib/auth-actions.ts','src/lib/reader-chrome.ts','src/lib/epub-pages.ts','src/lib/epub-scroll.ts','src/lib/retention.ts','src/lib/locations.ts','src/lib/sync.ts','src/lib/export.ts','src/server/validate-book.ts','src/app/api/sample/route.ts', ...(await readdir('tests')).filter(f => f.endsWith('.test.ts')).map(f => `tests/${f}`)];
 // An isolated output prevents stale compiled helpers from masking missing inputs.
 await mkdir('work', { recursive: true });
 const workDir = path.resolve('work');
