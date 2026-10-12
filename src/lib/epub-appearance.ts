@@ -1,10 +1,14 @@
 import type { Preferences } from './types';
 import { fontFor, presetFor } from './reading-preferences';
 
+const applied = new WeakMap<Document, string>();
+
 // Publisher px/pt sizes (including inline !important) must not lock reader text.
 // Keep the DOM intact so EPUB CFIs and saved highlights remain valid.
 export function applyEpubAppearance(document: Document, p: Preferences, documentScroll: boolean) {
   const body = document.body; if (!body) return;
+  const key = `${documentScroll}:${JSON.stringify(p)}`;
+  if (applied.get(document) === key) return;
   const palette = presetFor(p); const font = fontFor(p);
   let style = document.getElementById('folio-reading-style') as HTMLStyleElement | null;
   if (!style) { style = document.createElement('style'); style.id = 'folio-reading-style'; document.head.appendChild(style); }
@@ -32,4 +36,5 @@ export function applyEpubAppearance(document: Document, p: Preferences, document
     element.style.setProperty('font-size', relative[element.tagName.toUpperCase()] || 'inherit', 'important');
     element.style.setProperty('font-family', font, 'important');
   }
+  applied.set(document, key);
 }
